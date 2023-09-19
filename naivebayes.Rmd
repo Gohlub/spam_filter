@@ -1,0 +1,160 @@
+---
+title: "NaiveBayesProject"
+author: "Zahir Sabotic"
+date: "2023-05-23"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+###Loading the necessary libaries
+```{r}
+library(tidyverse)
+library(readr)
+library(stringr)
+library(ggplot2)
+library(dplyr)
+library(purrr)
+```
+
+Let us first take a look at the data:
+```{r}
+spam = read.csv("/Users/zahir/Downloads/spam.csv", header=TRUE, stringsAsFactors=FALSE)
+head(spam)
+```
+
+First we calculate the relative frequency of our categories (spam vs. non-spam). For our data, we have that around 87% of our entries is labeled as ham (not spam), and around 13% is labeled as spam.
+```{r}
+data = spam
+spam %>% group_by(Category) %>% summarise(Freq = n(),
+                                        percent = n()/nrow(data)*100)
+```
+
+Now, let us split our data into training set (which will include 80% of the data) and testing set (which will include 20%) for the purposes of first training or model, and using the remaining data to test how accurate our model is. First we see how many entries represent 80% and 20% of our data, respectively.
+
+Since the total number of entries is 5572, we will take a random sample of size 4458 and 1114 data points, respectively.
+```{r}
+set.seed(400)
+random_setofnumbers = sample(1:nrow(data), nrow(data))
+training_indices = random_setofnumbers[1:(0.8 * nrow(data))]
+test_indices = random_setofnumbers[((0.8 * nrow(data)) + 1):nrow(data)]
+training_data = data[training_indices,]
+test_data = data[test_indices,]
+```
+
+Our two data sets should have a relatively similar relative frequency of spam and non-spam as our original one, and we will double check just to be sure.
+```{r}
+training_data %>% group_by(Category) %>% summarise(Freq = n(), percent = n()/nrow(training_data)*100)
+
+test_data %>% group_by(Category) %>% summarise(Freq = n(), percent = n()/nrow(test_data)*100)
+
+
+
+```
+
+This seems to resemble our original data set, so we cam move ahead.
+
+For our algorithm, since we are our model will use the words us as a categorizing feature, we need to standardize the format of our messages and remove punctuation, convert every word to lowercase, and amend any numbers contained in the "Message" field. This is potentially a drawback since spam emails sometimes containing quantities referring to the prize amount, and henceforth we will not consider that aspect for our model. Below is a function that will do that for us.
+
+```{r}
+clean_message <- function(message) {
+  message %>%
+    str_replace_all("[:punct:]", "") %>% #removes the punctuation
+    str_replace_all("[:digit:]", "") %>% #removes numbers
+    tolower() #puts it all in lowercase
+}
+```
+Now, we must create a vocabulary which includes all the unique words in our training data set, which we will use to calculate the likelihood of a word appearing in either spam or non-spam.
+```{r}
+all_vocabulary = unlist(str_split(training_data$Message, "\\s+"))
+vocab = unique(all_vocabulary)
+head(vocab, 10)
+```
+
+Now we need to calculate the prior probability of encountering a not spam message (P(ham), labeled as p_ham) and spam (P(spam), labeled p_spam) of our training data set along with the number of unique words in our training data set (length_vocab). We will use these as our prior beliefs, which we will later use to calculate the posterior. 
+```{r}
+p_ham = sum(training_data$Category == "ham") / nrow(training_data)
+p_spam = 1 - p_ham
+
+p_spam
+p_ham
+```
+
+The next step now is to calculate the likelihood for each word in our vocabulary
+
+For that, we need the list of all words that are in the spam category and non spam category, respectively (paramater 'words'). The next part is the vocabulary, which we will use as a referance for counting the number of occurances of a word, and then calculate its relative frequency, or in this case the likelihood: P(word|ham) for example. We will then do this for every word, storing the results in p_list_spam and p_list_spam. This will later be needed to calculate the posterior.
+
+The function then returns p_word_given_category, the estimated probability of the word appearing in a certain category, given the observed data and applying Laplace smoothing, which is a method that accounts for likelihoods that exist in the training data, but not in the testing data (so that a likelihood of a word is not 0).
+```{r}
+calculate_likelihood <- function(words, vocab, alpha) {
+n_occurances_in_category = sum(words == vocab) #calculates the number of occurances of spam/ham words
+## below we calculate probability of the word appearing in a message given that the message belongs to a certain category
+p_word_given_category = (n_occurances_in_category + alpha) / (length(words) + alpha * length(vocab))
+return(p_word_given_category) #(P(word|ham) or (P(word|spam), depending on the words parameter
+}
+
+spam_words = unlist(strsplit(training_data$Message[training_data$Category == "spam"], "\\s+")) #fetch all spam words that occur
+ham_words = unlist(strsplit(training_data$Message[training_data$Category == "ham"], "\\s+")) #fetch all non spam words that occur
+alpha = 1 #for now
+p_list_spam = map2(vocab, alpha, calculate_likelihood, words = spam_words) #map2() applies calculate_likelihood to all messages in spam
+names(p_list_spam) = vocab #assigns the likelihood to the specific vocab message
+
+p_list_ham = map2(vocab, alpha, calculate_likelihood, words = ham_words) #map2() does the same for all non-spam messages
+names(p_list_ham) = vocab #assigns the likelihood to the specific vocab message
+head(p_list_ham, 2)
+```
+
+Our classify_message function calculates the posterior probability (P(ham|word) = P(ham) * P(word|ham), for example) for each word, and because we assume out identifiers are independent, we would then just multiply the probability of every word. However, in order to avoid numerical overflow and underflow (products of probabilities can either become too small or too big for the computer to handle), we just our calculations in the log domain. In order to avoid log(0) (in the event that the likelihood of a certain word is 0), we add 1e-10 to the probability which should not skew the results greatly.
+```{r}
+classify_message <- function(message, p_ham, p_spam, p_list_ham, p_list_spam) {
+  split_message = unlist(strsplit(clean_message(message), "\\s+")) #test_data$Message is calling our function to format the string
+  a = unlist(p_list_ham[c(split_message)]) + 1e-10  # Sum(P(ham|word) = P(ham) * P(word|ham)),
+  p_message_ham = log(p_ham) + sum(log(a))    
+  b = unlist(p_list_spam[c(split_message)]) + 1e-10 # Sum(P(spam|word) = P(spam) * P(word|spam))
+  p_message_spam = log(p_spam) + sum(log(b))
+  if_else(p_message_ham >= p_message_spam, "ham", "spam")
+}
+
+filter_output = map(test_data$Message, classify_message, p_ham = p_ham, p_spam = p_spam, p_list_ham = p_list_ham, p_list_spam = p_list_spam)
+comparison = cbind(test_data$Category, filter_output = unlist(filter_output))
+accuracy = sum(comparison[,1] == comparison[,2]) / nrow(comparison)
+
+cat("The accuracy of the spam filter with alpha =", alpha, "is", (accuracy*100), "%", "\n")
+```
+
+Now, let us figure out what value of alpha is yields the best results.
+```{r}
+alpha_range = seq(0.1, 1, by = 0.1)
+
+accuracy_list = c()
+
+for (alpha in alpha_range) {
+  p_list_spam = map2(vocab, alpha, calculate_likelihood, words = spam_words)
+  names(p_list_spam) = vocab
+  p_list_ham = map2(vocab, alpha, calculate_likelihood, words = ham_words)
+  names(p_list_ham) = vocab
+  
+  filter_output = map(test_data$Message, classify_message, p_ham = p_ham, p_spam = p_spam, p_list_ham = p_list_ham, p_list_spam = p_list_spam)
+  comparison = cbind(test_data$Category, filter_output = unlist(filter_output))
+  accuracy = sum(comparison[,1] == comparison[,2]) / nrow(comparison)
+  
+  accuracy_list = c(accuracy_list, accuracy)
+}
+
+# Plot accuracy by alpha value
+data_for_plot = data.frame(alpha = alpha_range, accuracy = accuracy_list)
+ggplot(data_for_plot, aes(x = alpha, y = accuracy)) +
+  geom_line() +
+  labs(x = "Alpha", y = "Accuracy", title = "Accuracy by Alpha Value")
+
+```
+As we see, there are a couple of local ranges that produce the maximum value, so for simplicity sake, we can use the alpha = 0.25 as our final parameter. For the final part, let us just test our model with an arbitrary message. For simplicity sake, these strings have already been formated.
+```{r}
+non_spam_message = "this is a test of our model"
+spam_message = "win this cash prize sign up now"
+
+first_output = classify_message(non_spam_message, p_ham = p_ham, p_spam = p_spam, p_list_ham = p_list_ham, p_list_spam = p_list_spam)
+
+second_output = classify_message(spam_message, p_ham = p_ham, p_spam = p_spam, p_list_ham = p_list_ham, p_list_spam = p_list_spam)
